@@ -613,8 +613,9 @@ def attention_layer(from_tensor,
       from_seq_length, to_seq_length]. The values should be 1 or 0. The
       attention scores will effectively be set to -infinity for any positions in
       the mask that are 0, and will be unchanged for positions that are 1.
+      在计算attention score的时候为了让mask=0的项对softmax后的概率无影响，在mask=0处会设为负无穷
     num_attention_heads: int. Number of attention heads.
-    size_per_head: int. Size of each attention head.  最大能跑的token数
+    size_per_head: int. Size of each attention head.  每个head中，q维度为[len_seq, size_per_head]
     query_act: (optional) Activation function for the query transform.
     key_act: (optional) Activation function for the key transform.
     value_act: (optional) Activation function for the value transform.
@@ -641,7 +642,9 @@ def attention_layer(from_tensor,
   Raises:
     ValueError: Any of the arguments or tensor shapes are invalid.
   """
-
+  # 将3D [batch_size, from_seq_length,num_attention_heads * size_per_head]变为
+  # [batch_size,num_attention_heads,seq_length,width]  
+  
   def transpose_for_scores(input_tensor, batch_size, num_attention_heads,
                            seq_length, width):
     output_tensor = tf.reshape(
@@ -682,7 +685,7 @@ def attention_layer(from_tensor,
   # `query_layer` = [B*F, N*H]  
   query_layer = tf.layers.dense(
       from_tensor_2d,
-      num_attention_heads * size_per_head,
+      num_attention_heads * size_per_head,    # 输出维度，size_per_head是q的维度（后面会reshape）
       activation=query_act,
       name="query",
       kernel_initializer=create_initializer(initializer_range))
@@ -726,7 +729,7 @@ def attention_layer(from_tensor,
     # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
     # masked positions, this operation will create a tensor which is 0.0 for
     # positions we want to attend and -10000.0 for masked positions.
-    adder = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0
+    adder = (1.0 - tf.cast(attention_mask, tf.float32)) * -10000.0   # mask不是1的都变负无穷
 
     # Since we are adding it to the raw scores before the softmax, this is
     # effectively the same as removing these entirely.
@@ -770,7 +773,7 @@ def attention_layer(from_tensor,
 
 def transformer_model(input_tensor,
                       attention_mask=None,
-                      hidden_size=768,
+                      hidden_size=768,       
                       num_hidden_layers=12,
                       num_attention_heads=12,
                       intermediate_size=3072,
@@ -816,12 +819,13 @@ def transformer_model(input_tensor,
   Raises:
     ValueError: A Tensor shape or parameter is invalid.
   """
+  # 隐层维度 需要能整除num_attention_heads 因为后面会将输出切分成num_attention_heads份（体现多头）
   if hidden_size % num_attention_heads != 0:
     raise ValueError(
         "The hidden size (%d) is not a multiple of the number of attention "
         "heads (%d)" % (hidden_size, num_attention_heads))
     
-  # attention head
+  # attention head   ,attention_score的维度[B,seq_len, hidden_size]
   attention_head_size = int(hidden_size / num_attention_heads) 
   input_shape = get_shape_list(input_tensor, expected_rank=3)
   batch_size = input_shape[0]
@@ -829,7 +833,7 @@ def transformer_model(input_tensor,
   input_width = input_shape[2]
 
   # The Transformer performs sum residuals on all layers so the input needs
-  # to be the same as the hidden size.
+  # to be the same as the hidden size. 后面还要加残差，所以维度一定要相同
   if input_width != hidden_size:
     raise ValueError("The width of the input tensor (%d) != hidden size (%d)" %
                      (input_width, hidden_size))
@@ -838,12 +842,15 @@ def transformer_model(input_tensor,
   # forth from a 3D tensor to a 2D tensor. Re-shapes are normally free on
   # the GPU/CPU but may not be free on the TPU, so we want to minimize them to
   # help the optimizer.
+  # input_tensor是[8,128,768]
   prev_output = reshape_to_matrix(input_tensor)
-
+  
+  # 12层attention
+  # 每一层都有两个残差神经网络，每一层的输出都放到list里面方便之后加
   all_layer_outputs = []
-  for layer_idx in range(num_hidden_layers):
+  for layer_idx in range(num_hidden_layers):  # 12
     with tf.variable_scope("layer_%d" % layer_idx):
-      layer_input = prev_output
+      layer_input = prev_output     # [8*128=1024,768] 记录上一层输出，之后加到残差里
 
       with tf.variable_scope("attention"):
         attention_heads = []
@@ -860,7 +867,7 @@ def transformer_model(input_tensor,
               batch_size=batch_size,
               from_seq_length=seq_length,
               to_seq_length=seq_length)
-          attention_heads.append(attention_head)
+          attention_heads.append(attention_head)    # 返回attention_score [B,seq_len, hidden_size=768]
 
         attention_output = None
         if len(attention_heads) == 1:
@@ -871,14 +878,14 @@ def transformer_model(input_tensor,
           attention_output = tf.concat(attention_heads, axis=-1)
 
         # Run a linear projection of `hidden_size` then add a residual
-        # with `layer_input`.
+        # with `layer_input`.  添加前向网络 并添加残差
         with tf.variable_scope("output"):
           attention_output = tf.layers.dense(
               attention_output,
               hidden_size,
               kernel_initializer=create_initializer(initializer_range))
           attention_output = dropout(attention_output, hidden_dropout_prob)
-          attention_output = layer_norm(attention_output + layer_input)
+          attention_output = layer_norm(attention_output + layer_input) # 加残差
 
       # The activation is only applied to the "intermediate" hidden layer.
       with tf.variable_scope("intermediate"):
@@ -895,8 +902,8 @@ def transformer_model(input_tensor,
             hidden_size,
             kernel_initializer=create_initializer(initializer_range))
         layer_output = dropout(layer_output, hidden_dropout_prob)
-        layer_output = layer_norm(layer_output + attention_output)
-        prev_output = layer_output
+        layer_output = layer_norm(layer_output + attention_output)  # 第二次残差
+        prev_output = layer_output    # 记录本层输出
         all_layer_outputs.append(layer_output)
 
   if do_return_all_layers:
