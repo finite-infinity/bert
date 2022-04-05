@@ -68,11 +68,11 @@ class BertConfig(object):
         initializing all weight matrices.
     """
     self.vocab_size = vocab_size
-    self.hidden_size = hidden_size
+    self.hidden_size = hidden_size     # 768 每个token的embedding的维度（bert的输入维度）
     self.num_hidden_layers = num_hidden_layers
     self.num_attention_heads = num_attention_heads
     self.hidden_act = hidden_act
-    self.intermediate_size = intermediate_size
+    self.intermediate_size = intermediate_size     # 3072 隐藏层维度
     self.hidden_dropout_prob = hidden_dropout_prob
     self.attention_probs_dropout_prob = attention_probs_dropout_prob
     self.max_position_embeddings = max_position_embeddings
@@ -84,17 +84,17 @@ class BertConfig(object):
     """Constructs a `BertConfig` from a Python dictionary of parameters."""
     config = BertConfig(vocab_size=None)
     for (key, value) in six.iteritems(json_object):
-      config.__dict__[key] = value
+      config.__dict__[key] = value       # 根据标注创建字典？
     return config
 
   @classmethod
   def from_json_file(cls, json_file):
     """Constructs a `BertConfig` from a json file of parameters."""
-    with tf.gfile.GFile(json_file, "r") as reader:
+    with tf.gfile.GFile(json_file, "r") as reader:   # 相当于open()，r是打开格式
       text = reader.read()
     return cls.from_dict(json.loads(text))
 
-  def to_dict(self):
+  def to_dict(self):         # 获得一份字典
     """Serializes this instance to a Python dictionary."""
     output = copy.deepcopy(self.__dict__)
     return output
@@ -131,9 +131,9 @@ class BertModel(object):
   def __init__(self,
                config,
                is_training,
-               input_ids,
-               input_mask=None,
-               token_type_ids=None,
+               input_ids,              # 句子的term
+               input_mask=None,        # 要mask掉的位置
+               token_type_ids=None,    # 标签0/1，代表两个句子是否连在一起，方便做nsp训练
                use_one_hot_embeddings=False,
                scope=None):
     """Constructor for BertModel.
@@ -157,32 +157,37 @@ class BertModel(object):
     if not is_training:
       config.hidden_dropout_prob = 0.0
       config.attention_probs_dropout_prob = 0.0
-
+    # input_id shape为[b,l] batch max_seq_length
     input_shape = get_shape_list(input_ids, expected_rank=2)
     batch_size = input_shape[0]
     seq_length = input_shape[1]
 
-    if input_mask is None:
+    if input_mask is None:    # 这是全不遮？
       input_mask = tf.ones(shape=[batch_size, seq_length], dtype=tf.int32)
 
-    if token_type_ids is None:
+    if token_type_ids is None:     # 不做nsp，句子没有连接关系
       token_type_ids = tf.zeros(shape=[batch_size, seq_length], dtype=tf.int32)
-
+    
+    # 输入input_ids 查找word id的嵌入 input_ids为（[CLS]+tokens+[SEP]+tokens+[SEP]+[PAD]*(pad_size - length)）
+    # 生成初步词向量embedding-output（one-hot word2seq之类的）以及embedding_tabel（训练得到的句子embedding）
     with tf.variable_scope(scope, default_name="bert"):
       with tf.variable_scope("embeddings"):
         # Perform embedding lookup on the word ids.
+        # embedding_output shape [b,l,hidden_size]
         (self.embedding_output, self.embedding_table) = embedding_lookup(
             input_ids=input_ids,
             vocab_size=config.vocab_size,
-            embedding_size=config.hidden_size,
+            embedding_size=config.hidden_size,       # 这里标了，embedding_size就是hidden_size
             initializer_range=config.initializer_range,
             word_embedding_name="word_embeddings",
             use_one_hot_embeddings=use_one_hot_embeddings)
 
         # Add positional embeddings and token type embeddings, then layer
         # normalize and perform dropout.
-        self.embedding_output = embedding_postprocessor(
-            input_tensor=self.embedding_output,
+        # 根据之前得到的词嵌入和句子间关系进行嵌入
+        
+        self.embedding_output = embedding_postprocessor(    
+            input_tensor=self.embedding_output,      
             use_token_type=True,
             token_type_ids=token_type_ids,
             token_type_vocab_size=config.type_vocab_size,
@@ -190,31 +195,31 @@ class BertModel(object):
             use_position_embeddings=True,
             position_embedding_name="position_embeddings",
             initializer_range=config.initializer_range,
-            max_position_embeddings=config.max_position_embeddings,
+            max_position_embeddings=config.max_position_embeddings,    # position_embeddings是绝对位置信息
             dropout_prob=config.hidden_dropout_prob)
 
       with tf.variable_scope("encoder"):
         # This converts a 2D mask of shape [batch_size, seq_length] to a 3D
         # mask of shape [batch_size, seq_length, seq_length] which is used
-        # for the attention scores.
-        attention_mask = create_attention_mask_from_input_mask(
+        # for the attention scores.  算注意力分数的时候是用mask掉的元素作为查询
+        attention_mask = create_attention_mask_from_input_mask(     # 创建mask
             input_ids, input_mask)
 
         # Run the stacked transformer.
         # `sequence_output` shape = [batch_size, seq_length, hidden_size].
         self.all_encoder_layers = transformer_model(
-            input_tensor=self.embedding_output,
+            input_tensor=self.embedding_output,     # 将embedding后的词向量输入到transformer中
             attention_mask=attention_mask,
             hidden_size=config.hidden_size,
             num_hidden_layers=config.num_hidden_layers,
-            num_attention_heads=config.num_attention_heads,
+            num_attention_heads=config.num_attention_heads,   # 多头attention
             intermediate_size=config.intermediate_size,
             intermediate_act_fn=get_activation(config.hidden_act),
             hidden_dropout_prob=config.hidden_dropout_prob,
             attention_probs_dropout_prob=config.attention_probs_dropout_prob,
             initializer_range=config.initializer_range,
             do_return_all_layers=True)
-
+      # 取encoder的最后一层（这个就是要的词嵌入，属于term尺度的） 
       self.sequence_output = self.all_encoder_layers[-1]
       # The "pooler" converts the encoded sequence tensor of shape
       # [batch_size, seq_length, hidden_size] to a tensor of shape
@@ -224,7 +229,8 @@ class BertModel(object):
       with tf.variable_scope("pooler"):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token. We assume that this has been pre-trained
-        first_token_tensor = tf.squeeze(self.sequence_output[:, 0:1, :], axis=1)
+        # [CLS]处的输出，经过tanh激活的全连接层，得到self.pooled_output，可用于句子级别的分类 下面这个把l维度删掉了
+        first_token_tensor = tf.squeeze(self.sequence_output[:, 0:1, :], axis=1) # 删除所有axis中维度为1的维度（因为没卵用） 
         self.pooled_output = tf.layers.dense(
             first_token_tensor,
             config.hidden_size,
@@ -276,7 +282,7 @@ def gelu(x):
       (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
   return x * cdf
 
-
+# 选择激活函数
 def get_activation(activation_string):
   """Maps a string to a Python function, e.g., "relu" => `tf.nn.relu`.
 
@@ -295,14 +301,14 @@ def get_activation(activation_string):
 
   # We assume that anything that"s not a string is already an activation
   # function, so we just return it.
-  if not isinstance(activation_string, six.string_types):
-    return activation_string
+  if not isinstance(activation_string, six.string_types): # 判断是否是string
+    return activation_string   
 
   if not activation_string:
     return None
 
-  act = activation_string.lower()
-  if act == "linear":
+  act = activation_string.lower()   # 小写
+  if act == "linear":     # 不激活
     return None
   elif act == "relu":
     return tf.nn.relu
@@ -424,7 +430,9 @@ def embedding_lookup(input_ids,
                       input_shape[0:-1] + [input_shape[-1] * embedding_size])
   return (output, embedding_table)
 
-
+# 嵌入流程
+# 一共三个embedding token、segment、position 最后输出是把他们加在一起
+# 长度为n个token的句子(对)的三个embedding都将是（1,n,hidden_size=768）
 def embedding_postprocessor(input_tensor,
                             use_token_type=False,
                             token_type_ids=None,
@@ -442,8 +450,8 @@ def embedding_postprocessor(input_tensor,
       embedding_size].
     use_token_type: bool. Whether to add embeddings for `token_type_ids`.
     token_type_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
-      Must be specified if `use_token_type` is True.
-    token_type_vocab_size: int. The vocabulary size of `token_type_ids`.
+      Must be specified if `use_token_type` is True.  是True就不能都是0/1，需要分两句
+    token_type_vocab_size: int. The vocabulary size of `token_type_ids`. 其实就是2(vocabulary_size ! =size)
     token_type_embedding_name: string. The name of the embedding table variable
       for token type ids.
     use_position_embeddings: bool. Whether to add position embeddings for the
@@ -467,20 +475,21 @@ def embedding_postprocessor(input_tensor,
   seq_length = input_shape[1]
   width = input_shape[2]
 
-  output = input_tensor
+  output = input_tensor    # 这已经是token embedding了，再加上分句和位置embedding就行
 
   if use_token_type:
     if token_type_ids is None:
       raise ValueError("`token_type_ids` must be specified if"
                        "`use_token_type` is True.")
-    token_type_table = tf.get_variable(
+    token_type_table = tf.get_variable(           # 分句表
         name=token_type_embedding_name,
-        shape=[token_type_vocab_size, width],
+        shape=[token_type_vocab_size, width],   # width就是hidden_size，两句话分两维
         initializer=create_initializer(initializer_range))
     # This vocab will be small so we always do one-hot here, since it is always
     # faster for a small vocabulary.
-    flat_token_type_ids = tf.reshape(token_type_ids, [-1])
+    flat_token_type_ids = tf.reshape(token_type_ids, [-1])  # 扁平分句向量
     one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size)
+    # 下面这个就是segement embeddings 分句用的
     token_type_embeddings = tf.matmul(one_hot_ids, token_type_table)
     token_type_embeddings = tf.reshape(token_type_embeddings,
                                        [batch_size, seq_length, width])
@@ -489,7 +498,7 @@ def embedding_postprocessor(input_tensor,
   if use_position_embeddings:
     assert_op = tf.assert_less_equal(seq_length, max_position_embeddings)
     with tf.control_dependencies([assert_op]):
-      full_position_embeddings = tf.get_variable(
+      full_position_embeddings = tf.get_variable(  # 位置表
           name=position_embedding_name,
           shape=[max_position_embeddings, width],
           initializer=create_initializer(initializer_range))
@@ -501,9 +510,10 @@ def embedding_postprocessor(input_tensor,
       # So `full_position_embeddings` is effectively an embedding table
       # for position [0, 1, 2, ..., max_position_embeddings-1], and the current
       # sequence has positions [0, 1, 2, ... seq_length-1], so we can just
-      # perform a slice.
+      # perform a slice. 
+      # 切片 第一维是token数量，每个token都有position 第二维是max_position_embeddings，是one-hot长度
       position_embeddings = tf.slice(full_position_embeddings, [0, 0],
-                                     [seq_length, -1])
+                                     [seq_length, -1])  # begin是[0,0]，长度是seq_len和全体
       num_dims = len(output.shape.as_list())
 
       # Only the last two dimensions are relevant (`seq_length` and `width`), so
@@ -520,7 +530,7 @@ def embedding_postprocessor(input_tensor,
   output = layer_norm_and_dropout(output, dropout_prob)
   return output
 
-
+# 初始值除了padding都是1
 def create_attention_mask_from_input_mask(from_tensor, to_mask):
   """Create 3D attention mask from a 2D tensor mask.
 
@@ -532,7 +542,7 @@ def create_attention_mask_from_input_mask(from_tensor, to_mask):
     float Tensor of shape [batch_size, from_seq_length, to_seq_length].
   """
   from_shape = get_shape_list(from_tensor, expected_rank=[2, 3])
-  batch_size = from_shape[0]
+  batch_size = from_shape[0]  
   from_seq_length = from_shape[1]
 
   to_shape = get_shape_list(to_mask, expected_rank=2)
@@ -554,7 +564,7 @@ def create_attention_mask_from_input_mask(from_tensor, to_mask):
 
   return mask
 
-
+# multi-head attention和self attention
 def attention_layer(from_tensor,
                     to_tensor,
                     attention_mask=None,
@@ -570,17 +580,23 @@ def attention_layer(from_tensor,
                     from_seq_length=None,
                     to_seq_length=None):
   """Performs multi-headed attention from `from_tensor` to `to_tensor`.
-
+  这是multi-headed attention的实现
+  如果from_tensor和to_tensor是相同的，那么这是self attention，因为查询的q和k、v一样
+  from_tensor中的每个时间步都与to_tensor中相应的序列有关，并返回一个固定的向量。
   This is an implementation of multi-headed attention based on "Attention
   is all you Need". If `from_tensor` and `to_tensor` are the same, then
   this is self-attention. Each timestep in `from_tensor` attends to the
   corresponding sequence in `to_tensor`, and returns a fixed-with vector.
+  
+  该函数首先将from_tensor映射到query张量中，to_tensor投射到key和value张量中。
+  这些（实际上）是长度为num_attention_heads的张量列表，每个张量shape为[batch_size, seq_length, size_per_head].
 
   This function first projects `from_tensor` into a "query" tensor and
   `to_tensor` into "key" and "value" tensors. These are (effectively) a list
   of tensors of length `num_attention_heads`, where each tensor is of shape
   [batch_size, seq_length, size_per_head].
-
+  
+  然后query和key向量做内积和缩放，经过softmax得到attention概率。value张量和这些概率相乘
   Then, the query and key tensors are dot-producted and scaled. These are
   softmaxed to obtain attention probabilities. The value tensors are then
   interpolated by these probabilities, then concatenated back to a single
@@ -598,7 +614,7 @@ def attention_layer(from_tensor,
       attention scores will effectively be set to -infinity for any positions in
       the mask that are 0, and will be unchanged for positions that are 1.
     num_attention_heads: int. Number of attention heads.
-    size_per_head: int. Size of each attention head.
+    size_per_head: int. Size of each attention head.  最大能跑的token数
     query_act: (optional) Activation function for the query transform.
     key_act: (optional) Activation function for the key transform.
     value_act: (optional) Activation function for the value transform.
@@ -661,8 +677,9 @@ def attention_layer(from_tensor,
 
   from_tensor_2d = reshape_to_matrix(from_tensor)
   to_tensor_2d = reshape_to_matrix(to_tensor)
-
-  # `query_layer` = [B*F, N*H]
+  
+  # from tensor乘矩阵W，也就是经过全连接网络，得到q k v
+  # `query_layer` = [B*F, N*H]  
   query_layer = tf.layers.dense(
       from_tensor_2d,
       num_attention_heads * size_per_head,
@@ -697,14 +714,14 @@ def attention_layer(from_tensor,
 
   # Take the dot product between "query" and "key" to get the raw
   # attention scores.
-  # `attention_scores` = [B, N, F, T]
+  # `attention_scores` = [B, N, F, T]  计算attention score  qk/(d)**0.5
   attention_scores = tf.matmul(query_layer, key_layer, transpose_b=True)
   attention_scores = tf.multiply(attention_scores,
                                  1.0 / math.sqrt(float(size_per_head)))
 
   if attention_mask is not None:
-    # `attention_mask` = [B, 1, F, T]
-    attention_mask = tf.expand_dims(attention_mask, axis=[1])
+    # `attention_mask` = [B, 1, F, T]  为num_attention_heads扩一维 对每个头，mask是不变的
+    attention_mask = tf.expand_dims(attention_mask, axis=[1])  
 
     # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
     # masked positions, this operation will create a tensor which is 0.0 for
@@ -737,7 +754,7 @@ def attention_layer(from_tensor,
   # `context_layer` = [B, F, N, H]
   context_layer = tf.transpose(context_layer, [0, 2, 1, 3])
 
-  if do_return_2d_tensor:
+  if do_return_2d_tensor:    # 返回2D方便tpu计算（将batch和seq_length合并）
     # `context_layer` = [B*F, N*H]
     context_layer = tf.reshape(
         context_layer,
@@ -803,8 +820,9 @@ def transformer_model(input_tensor,
     raise ValueError(
         "The hidden size (%d) is not a multiple of the number of attention "
         "heads (%d)" % (hidden_size, num_attention_heads))
-
-  attention_head_size = int(hidden_size / num_attention_heads)
+    
+  # attention head
+  attention_head_size = int(hidden_size / num_attention_heads) 
   input_shape = get_shape_list(input_tensor, expected_rank=3)
   batch_size = input_shape[0]
   seq_length = input_shape[1]
